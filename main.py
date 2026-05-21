@@ -1,8 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from playwright.async_api import async_playwright
-import asyncio
+import cloudscraper
 import re
 import urllib.parse
 from bs4 import BeautifulSoup
@@ -92,7 +91,7 @@ def extract_media(html: str, base_url: str) -> dict:
         if src and "placeholder" not in src and "logo" not in src.lower():
             return {"type": "image", "file_url": make_absolute(src, base_url)}
 
-    # data-src
+    # data-src (lazy load)
     for img in soup.find_all("img", attrs={"data-src": True}):
         src = img["data-src"]
         if src and not any(x in src.lower() for x in ["logo","icon","avatar","favicon"]):
@@ -106,6 +105,34 @@ def extract_media(html: str, base_url: str) -> dict:
 
     return {}
 
+def needs_password(html: str) -> bool:
+    lower = html.lower()
+    return 'type="password"' in lower or "type='password'" in lower
+
+def submit_password(scraper, html: str, page_url: str, password: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    form = soup.find("form")
+    if not form:
+        return html
+    action = form.get("action", page_url)
+    if not action.startswith("http"):
+        parsed = urllib.parse.urlparse(page_url)
+        action = f"{parsed.scheme}://{parsed.netloc}{action}" if action.startswith("/") else urllib.parse.urljoin(page_url, action)
+    data = {}
+    for inp in form.find_all("input"):
+        name = inp.get("name")
+        if name:
+            data[name] = inp.get("value", "")
+    for key in list(data.keys()):
+        if any(x in key.lower() for x in ["pass","pw","password","pwd","secret"]):
+            data[key] = password
+    method = (form.get("method") or "post").lower()
+    if method == "post":
+        resp = scraper.post(action, data=data, headers={"Referer": page_url})
+    else:
+        resp = scraper.get(action, params=data, headers={"Referer": page_url})
+    return resp.text
+
 def guess_filename(url: str, media_type: str) -> str:
     path = urllib.parse.urlparse(url).path
     name = path.rstrip("/").split("/")[-1]
@@ -114,53 +141,8 @@ def guess_filename(url: str, media_type: str) -> str:
         name = f"backup_{name}.{ext}"
     return name or f"backup.{media_type}"
 
-async def fetch_with_browser(url: str, password: str) -> str:
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ]
-        )
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            locale="zh-TW",
-        )
-        page = await context.new_page()
-
-        # 移除 webdriver 特徵
-        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-
-        # 等待 Cloudflare 驗證通過（最多等 10 秒）
-        for _ in range(10):
-            title = await page.title()
-            if "just a moment" not in title.lower():
-                break
-            await asyncio.sleep(1)
-
-        # 若有密碼欄位就填入
-        if password:
-            pw_input = page.locator('input[type="password"]').first
-            if await pw_input.count() > 0:
-                await pw_input.fill(password)
-                # 找提交按鈕
-                submit = page.locator('button[type="submit"], input[type="submit"]').first
-                if await submit.count() > 0:
-                    await submit.click()
-                    await page.wait_for_load_state("domcontentloaded")
-
-        # 等待媒體載入
-        await asyncio.sleep(2)
-        html = await page.content()
-        await browser.close()
-        return html
-
 @app.post("/api/fetch", response_model=FetchResult)
-async def fetch_media(req: FetchRequest):
+def fetch_media(req: FetchRequest):
     url = req.url.strip()
     if not url.startswith("http"):
         url = "https://" + url
@@ -170,7 +152,22 @@ async def fetch_media(req: FetchRequest):
         raise HTTPException(400, "無法辨識平台，請確認網址格式")
 
     try:
-        html = await fetch_with_browser(url, req.password)
+        # cloudscraper 會自動處理 Cloudflare JS 挑戰
+        scraper = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        )
+        resp = scraper.get(url, timeout=20)
+        html = resp.text
+
+        if not html:
+            return FetchResult(success=False, platform=platform, error="無法連線到目標網站")
+
+        # 需要密碼就提交
+        if needs_password(html):
+            if not req.password:
+                return FetchResult(success=False, platform=platform, error="此連結需要密碼，請輸入密碼後再試")
+            html = submit_password(scraper, html, url, req.password)
+
         media = extract_media(html, url)
 
         if not media or not media.get("file_url"):
