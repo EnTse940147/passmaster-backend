@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PassMaster</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#060606;color:#e0e0e0;min-height:100vh}
@@ -13,7 +14,7 @@ nav{position:sticky;top:0;z-index:100;background:rgba(6,6,6,.95);border-bottom:1
 .nb{background:none;border:none;color:#666;cursor:pointer;padding:5px 9px;border-radius:6px;font-size:13px;font-weight:500}
 .nb.on{color:#fff;background:#1a1a1a}
 #app{max-width:900px;margin:0 auto;padding:16px}
-.hero{text-align:center;padding:50px 0 36px;position:relative}
+.hero{text-align:center;padding:50px 0 36px}
 .htag{display:inline-block;background:#0a2918;color:#4ade80;border:1px solid #14532d;border-radius:20px;padding:4px 14px;font-size:13px;font-weight:600;margin-bottom:12px}
 .htitle{font-size:clamp(40px,10vw,76px);font-weight:900;letter-spacing:-3px;background:linear-gradient(135deg,#fff 35%,#4ade80);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px}
 .hdesc{color:#888;font-size:15px;line-height:1.8;margin-bottom:24px}
@@ -30,7 +31,7 @@ nav{position:sticky;top:0;z-index:100;background:rgba(6,6,6,.95);border-bottom:1
 .pwi{background:#0a0a0a;border:1px solid #222;border-radius:10px;padding:12px 44px 12px 15px;color:#e0e0e0;font-size:16px;outline:none;width:100%}
 .pwb{position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;color:#666;cursor:pointer;font-size:16px;padding:4px}
 .btn{background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;border:none;border-radius:10px;padding:13px;font-size:16px;font-weight:700;cursor:pointer;width:100%;margin-top:4px}
-.btn:disabled{opacity:0.6}
+.btn:disabled{opacity:0.6;cursor:not-allowed}
 .bto{background:none;border:1px solid #333;color:#ccc;width:auto;padding:10px 18px;font-size:14px;border-radius:10px;cursor:pointer}
 .err{background:#1f0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:10px 14px;color:#fca5a5;font-size:14px;margin-bottom:12px}
 .scard{background:#0a0a0a;border:1px solid #14532d;border-radius:12px;padding:18px;margin-top:16px}
@@ -41,14 +42,8 @@ nav{position:sticky;top:0;z-index:100;background:rgba(6,6,6,.95);border-bottom:1
 .dlg a{flex:1;min-width:120px;text-decoration:none}
 .pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-top:4px}
 .pc{background:#0d0d0d;border:1px solid;border-radius:12px;padding:16px;cursor:pointer;display:flex;flex-direction:column;gap:5px}
-.pn{font-weight:700;font-size:15px}
-.pd{color:#555;font-size:12px}
-.pg{font-size:13px;font-weight:600;margin-top:4px}
 .fg{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
 .fc{background:#111;border:1px solid #1a1a1a;border-radius:12px;padding:16px}
-.fi{font-size:26px;margin-bottom:8px}
-.ft{font-weight:700;margin-bottom:4px}
-.fd{color:#555;font-size:13px}
 .faq{background:#0d0d0d;border:1px solid #1a1a1a;border-radius:10px;padding:14px 16px;cursor:pointer;margin-bottom:8px}
 .faqq{display:flex;justify-content:space-between;font-weight:600;font-size:14px;align-items:center}
 .faqa{color:#777;font-size:13px;margin-top:10px;line-height:1.7;display:none}
@@ -60,9 +55,10 @@ footer{background:#040404;border-top:1px solid #111;margin-top:40px;padding:36px
 .fl{font-weight:800;font-size:16px;margin-bottom:6px}
 .fct{font-weight:700;font-size:13px;color:#ccc;margin-bottom:8px}
 .flk{background:none;border:none;color:#444;cursor:pointer;font-size:13px;display:block;padding:2px 0;text-align:left}
-.fb{text-align:center;color:#222;font-size:12px;padding:14px;border-top:1px solid #111;margin-top:0}
+.fb{text-align:center;color:#222;font-size:12px;padding:14px;border-top:1px solid #111}
 .hidden{display:none}
 .sec{padding:36px 0}
+.ts-wrap{margin-bottom:14px;display:flex;justify-content:flex-start}
 </style>
 </head>
 <body>
@@ -104,6 +100,7 @@ footer{background:#040404;border-top:1px solid #111;margin-top:40px;padding:36px
 </footer>
 <script>
 const API = "https://passmaster-backend.onrender.com";
+const TURNSTILE_SITE_KEY = "0x4AAAAAADTd3BcMtgTk1iPO";
 const PLATS = [
   {id:"risu", name:"Risu", color:"#ff6b6b", domain:"risu.io"},
   {id:"myppt",name:"MyPPT",color:"#4ecdc4",domain:"myppt.cc"},
@@ -113,6 +110,17 @@ const PLATS = [
   {id:"mork", name:"Mork", color:"#c084fc",domain:"mork.cc",off:true},
 ];
 let tab = "smart";
+
+function getTurnstileToken() {
+  const el = document.querySelector('[name="cf-turnstile-response"]');
+  return el ? el.value : "";
+}
+
+function resetTurnstile() {
+  if (window.turnstile) {
+    window.turnstile.reset();
+  }
+}
 
 function go(page) {
   document.querySelectorAll(".nb").forEach(b=>b.classList.remove("on"));
@@ -125,8 +133,9 @@ function go(page) {
       <h2>使用教學</h2>
       ${[["1","貼上連結","將短網址貼入輸入欄位，系統自動辨識平台。"],
          ["2","輸入密碼","如有密碼保護，請填入密碼。"],
-         ["3","開始備份","點擊查詢，後端自動抓取頁面內容。"],
-         ["4","下載備份","完成後預覽並下載檔案。"]
+         ["3","完成驗證","點選「我不是機器人」完成人機驗證。"],
+         ["4","開始備份","點擊查詢，後端自動抓取頁面內容。"],
+         ["5","下載備份","完成後預覽並下載檔案。"]
         ].map(([n,t,d])=>`<div class="step"><div class="stn">${n}</div><div><b>${t}</b><div style="color:#777;font-size:14px;margin-top:3px">${d}</div></div></div>`).join("")}
     </div>`;
     return;
@@ -138,6 +147,7 @@ function go(page) {
   const pp = PLATS.find(p=>p.id===page);
   if(pp){
     app.innerHTML=`<div style="padding:30px 0 50px"><h2 style="color:${pp.color}">${pp.name} 備份</h2><div class="card">${tool(pp.id)}</div></div>`;
+    initTurnstile();
     return;
   }
   // home
@@ -160,10 +170,11 @@ function go(page) {
   <div class="sec">
     <h2>支援平台</h2>
     <div class="pgrid">
-      ${PLATS.map(p=>`<div class="pc" style="border-color:${p.color}44;opacity:${p.off?.5:1}" onclick="${p.off?'':`go('${p.id}')`}">
+      ${PLATS.map(p=>`<div class="pc" style="border-color:${p.color}44;opacity:${p.off?.5:1}" onclick="${p.off?'':(`go('${p.id}')`)}">
         <div style="width:9px;height:9px;border-radius:50%;background:${p.color}"></div>
-        <div class="pn">${p.name}</div><div class="pd">${p.domain}</div>
-        ${p.off?`<span style="font-size:12px;color:#444">暫無服務</span>`:`<span class="pg" style="color:${p.color}">前往備份 →</span>`}
+        <div style="font-weight:700;font-size:15px">${p.name}</div>
+        <div style="color:#555;font-size:12px">${p.domain}</div>
+        ${p.off?`<span style="font-size:12px;color:#444">暫無服務</span>`:`<span style="font-size:13px;font-weight:600;color:${p.color}">前往備份 →</span>`}
       </div>`).join("")}
     </div>
   </div>
@@ -171,7 +182,7 @@ function go(page) {
     <div style="max-width:900px;margin:0 auto">
       <h2>功能特色</h2>
       <div class="fg">
-        ${[["🌐","多平台支援","整合五大短網址平台"],["⚡","智慧辨識","自動辨識平台"],["📁","多種格式","圖片影片音檔全支援"],["🔐","密碼保護","支援密碼保護連結"],["🖥","真實後端","伺服器直接抓取"],["💸","完全免費","所有功能免費"]].map(([i,t,d])=>`<div class="fc"><div class="fi">${i}</div><div class="ft">${t}</div><div class="fd">${d}</div></div>`).join("")}
+        ${[["🌐","多平台支援","整合五大短網址平台"],["⚡","智慧辨識","自動辨識平台"],["📁","多種格式","圖片影片音檔全支援"],["🔐","密碼保護","支援密碼保護連結"],["🛡","人機驗證","Cloudflare 保護防止濫用"],["💸","完全免費","所有功能免費"]].map(([i,t,d])=>`<div class="fc"><div style="font-size:26px;margin-bottom:8px">${i}</div><div style="font-weight:700">${t}</div><div style="color:#555;font-size:13px;margin-top:4px">${d}</div></div>`).join("")}
       </div>
     </div>
   </div>
@@ -180,9 +191,23 @@ function go(page) {
     ${[["PassMaster 是什麼？","一款短網址檔案備份工具，在連結過期前幫您保存圖片、影片和音檔。"],
        ["為什麼備份失敗？","可能原因：連結已過期、密碼錯誤、或來源平台暫時無法連線。"],
        ["支援哪些格式？","JPG、PNG、GIF、WebP、MP4、MP3、OGG 等常見格式。"],
-       ["Smart 模式是什麼？","自動辨識短網址平台，省去手動選擇步驟。"]
+       ["為什麼需要人機驗證？","防止機器人濫用服務，保護平台穩定運作。"]
       ].map(([q,a],i)=>`<div class="faq" onclick="tfaq(${i})"><div class="faqq"><span>${q}</span><span id="fa${i}">▾</span></div><div class="faqa" id="faa${i}">${a}</div></div>`).join("")}
   </div>`;
+  initTurnstile();
+}
+
+function initTurnstile() {
+  setTimeout(() => {
+    const container = document.getElementById("turnstile-container");
+    if (container && window.turnstile) {
+      container.innerHTML = "";
+      window.turnstile.render(container, {
+        sitekey: TURNSTILE_SITE_KEY,
+        theme: "dark",
+      });
+    }
+  }, 100);
 }
 
 function renderTabs(){
@@ -199,7 +224,7 @@ function setTab(id){
   const el=document.getElementById("tabs");
   if(el) el.innerHTML=renderTabs();
   const ta=document.getElementById("ta");
-  if(ta) ta.innerHTML=tool(id==="smart"?null:id);
+  if(ta){ ta.innerHTML=tool(id==="smart"?null:id); initTurnstile(); }
 }
 
 function tool(pid){
@@ -210,6 +235,7 @@ function tool(pid){
   return `${badge}
   <div class="field"><label>短網址連結</label><input class="inp" id="ui" type="url" placeholder="${ph}" autocomplete="off" autocorrect="off" autocapitalize="off" onkeydown="if(event.key==='Enter')doFetch()"></div>
   <div class="field"><label>密碼（選填）</label><div class="pww"><input class="pwi" id="pi" type="password" placeholder="如連結有密碼保護，請輸入密碼" autocomplete="off" autocorrect="off" autocapitalize="off"><button class="pwb" id="ptb" onclick="tpw()" type="button">👁</button></div></div>
+  <div class="ts-wrap"><div id="turnstile-container"></div></div>
   <div class="err hidden" id="eb"></div>
   <button class="btn" id="fb" onclick="doFetch()">🔍 開始備份查詢</button>
   <div id="rb"></div>`;
@@ -241,7 +267,9 @@ async function doFetch(){
   if(!ui||!eb||!rb||!fb)return;
   const url=ui.value.trim();
   const pw=pi?pi.value.trim():"";
+  const token=getTurnstileToken();
   if(!url){eb.textContent="⚠️ 請輸入短網址連結";eb.classList.remove("hidden");return;}
+  if(!token){eb.textContent="⚠️ 請先完成人機驗證";eb.classList.remove("hidden");return;}
   eb.classList.add("hidden");
   rb.innerHTML="";
   fb.textContent="🔄 查詢中，請稍候...";
@@ -250,11 +278,12 @@ async function doFetch(){
     const res=await fetch(`${API}/api/fetch`,{
       method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({url,password:pw})
+      body:JSON.stringify({url,password:pw,turnstile_token:token})
     });
     const d=await res.json();
     fb.textContent="🔍 開始備份查詢";
     fb.disabled=false;
+    resetTurnstile();
     if(!res.ok||!d.success){
       eb.textContent="⚠️ "+(d.detail||d.error||"查無內容，連結可能已過期或密碼錯誤");
       eb.classList.remove("hidden");
@@ -277,6 +306,7 @@ async function doFetch(){
   }catch(e){
     fb.textContent="🔍 開始備份查詢";
     fb.disabled=false;
+    resetTurnstile();
     eb.textContent="⚠️ 連線失敗："+e.message;
     eb.classList.remove("hidden");
   }
