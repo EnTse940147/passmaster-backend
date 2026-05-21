@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import cloudscraper
+import httpx
 import re
 import urllib.parse
 from bs4 import BeautifulSoup
@@ -14,9 +15,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+TURNSTILE_SECRET = "0x4AAAAAADTd3C2m2o09b0QBK-7tKiD-NyA"
+
 class FetchRequest(BaseModel):
     url: str
     password: str = ""
+    turnstile_token: str = ""
 
 class FetchResult(BaseModel):
     success: bool
@@ -25,6 +29,17 @@ class FetchResult(BaseModel):
     filename: str = ""
     platform: str = ""
     error: str = ""
+
+def verify_turnstile(token: str) -> bool:
+    try:
+        resp = httpx.post(
+            "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+            data={"secret": TURNSTILE_SECRET, "response": token},
+            timeout=10,
+        )
+        return resp.json().get("success", False)
+    except:
+        return False
 
 def detect_platform(url: str) -> str:
     for platform, pattern in {
@@ -53,7 +68,6 @@ def make_absolute(src: str, base_url: str) -> str:
 def extract_media(html: str, base_url: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
 
-    # 影片
     for video in soup.find_all("video"):
         src = video.get("src", "")
         if not src:
@@ -62,7 +76,6 @@ def extract_media(html: str, base_url: str) -> dict:
         if src and not src.startswith("blob:"):
             return {"type": "video", "file_url": make_absolute(src, base_url)}
 
-    # 音檔
     for audio in soup.find_all("audio"):
         src = audio.get("src", "")
         if not src:
@@ -71,7 +84,6 @@ def extract_media(html: str, base_url: str) -> dict:
         if src:
             return {"type": "audio", "file_url": make_absolute(src, base_url)}
 
-    # script 裡的媒體 URL
     for script in soup.find_all("script"):
         text = script.string or ""
         m = re.search(
@@ -84,20 +96,17 @@ def extract_media(html: str, base_url: str) -> dict:
             t = "video" if ext in ("mp4","m3u8") else "audio" if ext in ("mp3","ogg") else "image"
             return {"type": t, "file_url": src}
 
-    # og:image
     og = soup.find("meta", property="og:image")
     if og and og.get("content"):
         src = og["content"]
         if src and "placeholder" not in src and "logo" not in src.lower():
             return {"type": "image", "file_url": make_absolute(src, base_url)}
 
-    # data-src (lazy load)
     for img in soup.find_all("img", attrs={"data-src": True}):
         src = img["data-src"]
         if src and not any(x in src.lower() for x in ["logo","icon","avatar","favicon"]):
             return {"type": "image", "file_url": make_absolute(src, base_url)}
 
-    # 一般 img
     for img in soup.find_all("img"):
         src = img.get("src", "")
         if src and not any(x in src.lower() for x in ["logo","icon","avatar","favicon","banner","placeholder"]):
@@ -143,6 +152,12 @@ def guess_filename(url: str, media_type: str) -> str:
 
 @app.post("/api/fetch", response_model=FetchResult)
 def fetch_media(req: FetchRequest):
+    # 驗證 Turnstile
+    if not req.turnstile_token:
+        raise HTTPException(400, "請完成人機驗證")
+    if not verify_turnstile(req.turnstile_token):
+        raise HTTPException(403, "人機驗證失敗，請重試")
+
     url = req.url.strip()
     if not url.startswith("http"):
         url = "https://" + url
@@ -152,7 +167,6 @@ def fetch_media(req: FetchRequest):
         raise HTTPException(400, "無法辨識平台，請確認網址格式")
 
     try:
-        # cloudscraper 會自動處理 Cloudflare JS 挑戰
         scraper = cloudscraper.create_scraper(
             browser={"browser": "chrome", "platform": "windows", "mobile": False}
         )
@@ -162,7 +176,6 @@ def fetch_media(req: FetchRequest):
         if not html:
             return FetchResult(success=False, platform=platform, error="無法連線到目標網站")
 
-        # 需要密碼就提交
         if needs_password(html):
             if not req.password:
                 return FetchResult(success=False, platform=platform, error="此連結需要密碼，請輸入密碼後再試")
