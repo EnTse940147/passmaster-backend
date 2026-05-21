@@ -1,7 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import subprocess
+from playwright.async_api import async_playwright
+import asyncio
 import re
 import urllib.parse
 from bs4 import BeautifulSoup
@@ -25,7 +26,6 @@ class FetchResult(BaseModel):
     filename: str = ""
     platform: str = ""
     error: str = ""
-    debug: str = ""  # 暫時加上 debug
 
 def detect_platform(url: str) -> str:
     for platform, pattern in {
@@ -38,48 +38,6 @@ def detect_platform(url: str) -> str:
         if re.search(pattern, url, re.IGNORECASE):
             return platform
     return ""
-
-def curl_get(url: str, cookies: str = "", referer: str = "") -> tuple[str, str]:
-    """回傳 (html內容, 實際最終URL)"""
-    cmd = [
-        "curl", "-sL",
-        "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "-H", "Accept-Language: zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
-        "-H", "Accept-Encoding: gzip, deflate, br",
-        "-H", "Connection: keep-alive",
-        "-H", "Upgrade-Insecure-Requests: 1",
-        "--compressed",
-        "--max-time", "20",
-        "-c", "/tmp/cookies.txt",  # 儲存 cookie
-        "-b", "/tmp/cookies.txt",  # 帶上 cookie
-    ]
-    if referer:
-        cmd += ["-H", f"Referer: {referer}"]
-    if cookies:
-        cmd += ["-b", cookies]
-    cmd.append(url)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
-    return result.stdout, url
-
-def curl_post(url: str, data: dict, referer: str = "") -> str:
-    form_data = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in data.items())
-    cmd = [
-        "curl", "-sL",
-        "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "-H", "Accept-Language: zh-TW,zh;q=0.9,en-US;q=0.8",
-        "-H", "Content-Type: application/x-www-form-urlencoded",
-        "-H", f"Referer: {referer or url}",
-        "--compressed",
-        "--max-time", "20",
-        "-c", "/tmp/cookies.txt",
-        "-b", "/tmp/cookies.txt",
-        "-d", form_data,
-        url,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
-    return result.stdout
 
 def make_absolute(src: str, base_url: str) -> str:
     if not src:
@@ -96,7 +54,7 @@ def make_absolute(src: str, base_url: str) -> str:
 def extract_media(html: str, base_url: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
 
-    # 影片 tag
+    # 影片
     for video in soup.find_all("video"):
         src = video.get("src", "")
         if not src:
@@ -105,7 +63,7 @@ def extract_media(html: str, base_url: str) -> dict:
         if src and not src.startswith("blob:"):
             return {"type": "video", "file_url": make_absolute(src, base_url)}
 
-    # 音檔 tag
+    # 音檔
     for audio in soup.find_all("audio"):
         src = audio.get("src", "")
         if not src:
@@ -114,7 +72,7 @@ def extract_media(html: str, base_url: str) -> dict:
         if src:
             return {"type": "audio", "file_url": make_absolute(src, base_url)}
 
-    # script 裡找媒體 URL
+    # script 裡的媒體 URL
     for script in soup.find_all("script"):
         text = script.string or ""
         m = re.search(
@@ -134,7 +92,7 @@ def extract_media(html: str, base_url: str) -> dict:
         if src and "placeholder" not in src and "logo" not in src.lower():
             return {"type": "image", "file_url": make_absolute(src, base_url)}
 
-    # data-src (lazy load)
+    # data-src
     for img in soup.find_all("img", attrs={"data-src": True}):
         src = img["data-src"]
         if src and not any(x in src.lower() for x in ["logo","icon","avatar","favicon"]):
@@ -148,34 +106,6 @@ def extract_media(html: str, base_url: str) -> dict:
 
     return {}
 
-def needs_password(html: str) -> bool:
-    lower = html.lower()
-    return ('type="password"' in lower or "type='password'" in lower)
-
-def submit_password(html: str, page_url: str, password: str) -> str:
-    soup = BeautifulSoup(html, "html.parser")
-    form = soup.find("form")
-    if not form:
-        return html
-    action = form.get("action", page_url)
-    if not action.startswith("http"):
-        parsed = urllib.parse.urlparse(page_url)
-        action = f"{parsed.scheme}://{parsed.netloc}{action}" if action.startswith("/") else urllib.parse.urljoin(page_url, action)
-    data = {}
-    for inp in form.find_all("input"):
-        name = inp.get("name")
-        if name:
-            data[name] = inp.get("value", "")
-    for key in list(data.keys()):
-        if any(x in key.lower() for x in ["pass","pw","password","pwd","secret"]):
-            data[key] = password
-    method = (form.get("method") or "post").lower()
-    if method == "post":
-        return curl_post(action, data, referer=page_url)
-    else:
-        qs = urllib.parse.urlencode(data)
-        return curl_get(f"{action}?{qs}", referer=page_url)[0]
-
 def guess_filename(url: str, media_type: str) -> str:
     path = urllib.parse.urlparse(url).path
     name = path.rstrip("/").split("/")[-1]
@@ -184,8 +114,53 @@ def guess_filename(url: str, media_type: str) -> str:
         name = f"backup_{name}.{ext}"
     return name or f"backup.{media_type}"
 
+async def fetch_with_browser(url: str, password: str) -> str:
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+            ]
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            locale="zh-TW",
+        )
+        page = await context.new_page()
+
+        # 移除 webdriver 特徵
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        # 等待 Cloudflare 驗證通過（最多等 10 秒）
+        for _ in range(10):
+            title = await page.title()
+            if "just a moment" not in title.lower():
+                break
+            await asyncio.sleep(1)
+
+        # 若有密碼欄位就填入
+        if password:
+            pw_input = page.locator('input[type="password"]').first
+            if await pw_input.count() > 0:
+                await pw_input.fill(password)
+                # 找提交按鈕
+                submit = page.locator('button[type="submit"], input[type="submit"]').first
+                if await submit.count() > 0:
+                    await submit.click()
+                    await page.wait_for_load_state("domcontentloaded")
+
+        # 等待媒體載入
+        await asyncio.sleep(2)
+        html = await page.content()
+        await browser.close()
+        return html
+
 @app.post("/api/fetch", response_model=FetchResult)
-def fetch_media(req: FetchRequest):
+async def fetch_media(req: FetchRequest):
     url = req.url.strip()
     if not url.startswith("http"):
         url = "https://" + url
@@ -195,24 +170,11 @@ def fetch_media(req: FetchRequest):
         raise HTTPException(400, "無法辨識平台，請確認網址格式")
 
     try:
-        html, final_url = curl_get(url)
-        if not html:
-            return FetchResult(success=False, platform=platform, error="無法連線到目標網站")
-
-        # 需要密碼就提交
-        if needs_password(html) and req.password:
-            html = submit_password(html, url, req.password)
-        elif needs_password(html) and not req.password:
-            return FetchResult(success=False, platform=platform, error="此連結需要密碼，請輸入密碼後再試")
-
+        html = await fetch_with_browser(url, req.password)
         media = extract_media(html, url)
 
-        # debug: 回傳前500字元幫助排查
-        soup = BeautifulSoup(html, "html.parser")
-        debug_info = f"title={soup.title.string if soup.title else 'none'} | imgs={len(soup.find_all('img'))} | videos={len(soup.find_all('video'))} | html_len={len(html)}"
-
         if not media or not media.get("file_url"):
-            # 找 a 連結裡的媒體
+            soup = BeautifulSoup(html, "html.parser")
             for a in soup.find_all("a", href=True):
                 href = a["href"]
                 m = re.search(r'\.(mp4|jpg|jpeg|png|gif|webp|mp3|ogg)(\?|$)', href, re.I)
@@ -223,10 +185,10 @@ def fetch_media(req: FetchRequest):
                         success=True, type=t,
                         file_url=make_absolute(href, url),
                         filename=guess_filename(href, t),
-                        platform=platform, debug=debug_info
+                        platform=platform,
                     )
             return FetchResult(success=False, platform=platform,
-                error="查無媒體內容，連結可能已過期或密碼錯誤", debug=debug_info)
+                error="查無媒體內容，連結可能已過期或密碼錯誤")
 
         return FetchResult(
             success=True,
@@ -234,11 +196,8 @@ def fetch_media(req: FetchRequest):
             file_url=media["file_url"],
             filename=guess_filename(media["file_url"], media["type"]),
             platform=platform,
-            debug=debug_info,
         )
 
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, "請求逾時，請稍後再試")
     except Exception as e:
         raise HTTPException(500, f"抓取失敗: {str(e)}")
 
