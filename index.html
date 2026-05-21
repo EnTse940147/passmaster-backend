@@ -34,6 +34,7 @@ nav{position:sticky;top:0;z-index:100;background:rgba(6,6,6,.95);border-bottom:1
 .btn:disabled{opacity:0.6;cursor:not-allowed}
 .bto{background:none;border:1px solid #333;color:#ccc;width:auto;padding:10px 18px;font-size:14px;border-radius:10px;cursor:pointer}
 .err{background:#1f0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:10px 14px;color:#fca5a5;font-size:14px;margin-bottom:12px}
+.info{background:#0a1f2a;border:1px solid #164e63;border-radius:8px;padding:10px 14px;color:#7dd3fc;font-size:13px;margin-bottom:12px}
 .scard{background:#0a0a0a;border:1px solid #14532d;border-radius:12px;padding:18px;margin-top:16px}
 .stitle{color:#4ade80;font-weight:700;margin-bottom:12px}
 .pimg{width:100%;max-height:320px;object-fit:contain;border-radius:8px;background:#111;display:block;margin-bottom:10px}
@@ -58,7 +59,7 @@ footer{background:#040404;border-top:1px solid #111;margin-top:40px;padding:36px
 .fb{text-align:center;color:#222;font-size:12px;padding:14px;border-top:1px solid #111}
 .hidden{display:none}
 .sec{padding:36px 0}
-.ts-wrap{margin-bottom:14px;display:flex;justify-content:flex-start}
+.ts-wrap{margin-bottom:14px}
 </style>
 </head>
 <body>
@@ -99,8 +100,12 @@ footer{background:#040404;border-top:1px solid #111;margin-top:40px;padding:36px
   <div class="fb">© PassMaster. All rights reserved.</div>
 </footer>
 <script>
-const API = "https://passmaster-backend.onrender.com";
 const TURNSTILE_SITE_KEY = "0x4AAAAAADTd3BcMtgTk1iPO";
+const CORS_PROXIES = [
+  "https://corsproxy.io/?url=",
+  "https://api.allorigins.win/raw?url=",
+  "https://thingproxy.freeboard.io/fetch/",
+];
 const PLATS = [
   {id:"risu", name:"Risu", color:"#ff6b6b", domain:"risu.io"},
   {id:"myppt",name:"MyPPT",color:"#4ecdc4",domain:"myppt.cc"},
@@ -111,15 +116,169 @@ const PLATS = [
 ];
 let tab = "smart";
 
+// 從瀏覽器直接抓頁面，用 CORS proxy 中轉
+async function fetchPage(url) {
+  for (const proxy of CORS_PROXIES) {
+    try {
+      const res = await fetch(proxy + encodeURIComponent(url), {
+        headers: { "User-Agent": "Mozilla/5.0" },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text.length > 100 && !text.includes("just a moment")) {
+          return text;
+        }
+      }
+    } catch(e) { continue; }
+  }
+  return null;
+}
+
+async function postForm(action, data, referer) {
+  const body = new URLSearchParams(data).toString();
+  for (const proxy of CORS_PROXIES) {
+    try {
+      const res = await fetch(proxy + encodeURIComponent(action), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Referer": referer,
+        },
+        body,
+        signal: AbortSignal.timeout(15000),
+      });
+      if (res.ok) {
+        const text = await res.text();
+        if (text && text.length > 100) return text;
+      }
+    } catch(e) { continue; }
+  }
+  return null;
+}
+
+function makeAbsolute(src, base) {
+  if (!src) return "";
+  if (src.startsWith("http")) return src;
+  try {
+    const b = new URL(base);
+    if (src.startsWith("//")) return b.protocol + src;
+    if (src.startsWith("/")) return b.origin + src;
+    return new URL(src, base).href;
+  } catch { return src; }
+}
+
+function extractMedia(html, baseUrl) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, "text/html");
+
+  // 影片
+  const video = doc.querySelector("video");
+  if (video) {
+    const src = video.src || video.querySelector("source")?.src;
+    if (src && !src.startsWith("blob:")) return {type:"video", url: makeAbsolute(src, baseUrl)};
+  }
+
+  // 音檔
+  const audio = doc.querySelector("audio");
+  if (audio) {
+    const src = audio.src || audio.querySelector("source")?.src;
+    if (src) return {type:"audio", url: makeAbsolute(src, baseUrl)};
+  }
+
+  // script 裡找媒體 URL
+  for (const script of doc.querySelectorAll("script")) {
+    const text = script.textContent || "";
+    const m = text.match(/["'](https?:\/\/[^"']+\.(mp4|m3u8|jpg|jpeg|png|gif|webp|mp3|ogg)(\?[^"']*)?)['"]/);
+    if (m) {
+      const ext = m[2].toLowerCase();
+      const t = ["mp4","m3u8"].includes(ext) ? "video" : ["mp3","ogg"].includes(ext) ? "audio" : "image";
+      return {type: t, url: m[1]};
+    }
+  }
+
+  // og:image
+  const og = doc.querySelector('meta[property="og:image"]');
+  if (og?.content && !og.content.includes("logo") && !og.content.includes("placeholder")) {
+    return {type:"image", url: makeAbsolute(og.content, baseUrl)};
+  }
+
+  // data-src
+  for (const img of doc.querySelectorAll("img[data-src]")) {
+    const src = img.dataset.src;
+    if (src && !["logo","icon","avatar","favicon"].some(x=>src.toLowerCase().includes(x))) {
+      return {type:"image", url: makeAbsolute(src, baseUrl)};
+    }
+  }
+
+  // img
+  for (const img of doc.querySelectorAll("img")) {
+    const src = img.src || img.getAttribute("src");
+    if (src && src.startsWith("http") && !["logo","icon","avatar","favicon","banner","placeholder"].some(x=>src.toLowerCase().includes(x))) {
+      return {type:"image", url: src};
+    }
+  }
+
+  // a href 媒體連結
+  for (const a of doc.querySelectorAll("a[href]")) {
+    const href = a.href;
+    const m = href.match(/\.(mp4|jpg|jpeg|png|gif|webp|mp3|ogg)(\?|$)/i);
+    if (m) {
+      const ext = m[1].toLowerCase();
+      const t = ext==="mp4" ? "video" : ["mp3","ogg"].includes(ext) ? "audio" : "image";
+      return {type: t, url: href};
+    }
+  }
+
+  return null;
+}
+
+function needsPassword(html) {
+  return html.toLowerCase().includes('type="password"') || html.toLowerCase().includes("type='password'");
+}
+
+function findForm(html, pageUrl) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, "text/html");
+  const form = doc.querySelector("form");
+  if (!form) return null;
+  let action = form.getAttribute("action") || pageUrl;
+  if (!action.startsWith("http")) {
+    try { action = new URL(action, pageUrl).href; } catch {}
+  }
+  const data = {};
+  for (const inp of form.querySelectorAll("input")) {
+    const name = inp.getAttribute("name");
+    if (name) data[name] = inp.value || "";
+  }
+  return {action, data, method: (form.getAttribute("method")||"post").toLowerCase()};
+}
+
+function guessFilename(url, type) {
+  try {
+    const path = new URL(url).pathname;
+    const name = path.split("/").pop();
+    if (name && name.includes(".")) return name;
+    const ext = {image:"jpg",video:"mp4",audio:"mp3"}[type]||"bin";
+    return "backup_" + (name||"file") + "." + ext;
+  } catch { return "backup." + (type||"bin"); }
+}
+
 function getTurnstileToken() {
   const el = document.querySelector('[name="cf-turnstile-response"]');
   return el ? el.value : "";
 }
-
 function resetTurnstile() {
-  if (window.turnstile) {
-    window.turnstile.reset();
-  }
+  if (window.turnstile) window.turnstile.reset();
+}
+function initTurnstile() {
+  setTimeout(() => {
+    const container = document.getElementById("turnstile-container");
+    if (container && window.turnstile) {
+      container.innerHTML = "";
+      window.turnstile.render(container, {sitekey: TURNSTILE_SITE_KEY, theme:"dark"});
+    }
+  }, 200);
 }
 
 function go(page) {
@@ -134,7 +293,7 @@ function go(page) {
       ${[["1","貼上連結","將短網址貼入輸入欄位，系統自動辨識平台。"],
          ["2","輸入密碼","如有密碼保護，請填入密碼。"],
          ["3","完成驗證","點選「我不是機器人」完成人機驗證。"],
-         ["4","開始備份","點擊查詢，後端自動抓取頁面內容。"],
+         ["4","開始備份","點擊查詢，系統從您的瀏覽器直接抓取內容。"],
          ["5","下載備份","完成後預覽並下載檔案。"]
         ].map(([n,t,d])=>`<div class="step"><div class="stn">${n}</div><div><b>${t}</b><div style="color:#777;font-size:14px;margin-top:3px">${d}</div></div></div>`).join("")}
     </div>`;
@@ -150,7 +309,7 @@ function go(page) {
     initTurnstile();
     return;
   }
-  // home
+
   app.innerHTML=`
   <div class="hero">
     <div class="htag">短網址檔案備份工具</div>
@@ -182,7 +341,7 @@ function go(page) {
     <div style="max-width:900px;margin:0 auto">
       <h2>功能特色</h2>
       <div class="fg">
-        ${[["🌐","多平台支援","整合五大短網址平台"],["⚡","智慧辨識","自動辨識平台"],["📁","多種格式","圖片影片音檔全支援"],["🔐","密碼保護","支援密碼保護連結"],["🛡","人機驗證","Cloudflare 保護防止濫用"],["💸","完全免費","所有功能免費"]].map(([i,t,d])=>`<div class="fc"><div style="font-size:26px;margin-bottom:8px">${i}</div><div style="font-weight:700">${t}</div><div style="color:#555;font-size:13px;margin-top:4px">${d}</div></div>`).join("")}
+        ${[["🌐","多平台支援","整合五大短網址平台"],["⚡","智慧辨識","自動辨識平台"],["📁","多種格式","圖片影片音檔全支援"],["🔐","密碼保護","支援密碼保護連結"],["🛡","人機驗證","防止濫用保護服務"],["💸","完全免費","所有功能免費"]].map(([i,t,d])=>`<div class="fc"><div style="font-size:26px;margin-bottom:8px">${i}</div><div style="font-weight:700">${t}</div><div style="color:#555;font-size:13px;margin-top:4px">${d}</div></div>`).join("")}
       </div>
     </div>
   </div>
@@ -195,19 +354,6 @@ function go(page) {
       ].map(([q,a],i)=>`<div class="faq" onclick="tfaq(${i})"><div class="faqq"><span>${q}</span><span id="fa${i}">▾</span></div><div class="faqa" id="faa${i}">${a}</div></div>`).join("")}
   </div>`;
   initTurnstile();
-}
-
-function initTurnstile() {
-  setTimeout(() => {
-    const container = document.getElementById("turnstile-container");
-    if (container && window.turnstile) {
-      container.innerHTML = "";
-      window.turnstile.render(container, {
-        sitekey: TURNSTILE_SITE_KEY,
-        theme: "dark",
-      });
-    }
-  }, 100);
 }
 
 function renderTabs(){
@@ -265,49 +411,76 @@ async function doFetch(){
   const rb=document.getElementById("rb");
   const fb=document.getElementById("fb");
   if(!ui||!eb||!rb||!fb)return;
+
   const url=ui.value.trim();
   const pw=pi?pi.value.trim():"";
   const token=getTurnstileToken();
+
   if(!url){eb.textContent="⚠️ 請輸入短網址連結";eb.classList.remove("hidden");return;}
   if(!token){eb.textContent="⚠️ 請先完成人機驗證";eb.classList.remove("hidden");return;}
+
   eb.classList.add("hidden");
   rb.innerHTML="";
   fb.textContent="🔄 查詢中，請稍候...";
   fb.disabled=true;
-  try{
-    const res=await fetch(`${API}/api/fetch`,{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({url,password:pw,turnstile_token:token})
-    });
-    const d=await res.json();
+
+  try {
+    // 第一次抓頁面
+    let html = await fetchPage(url);
+    if (!html) {
+      throw new Error("無法連線到目標網站，請稍後再試");
+    }
+
+    // 需要密碼就提交表單
+    if (needsPassword(html)) {
+      if (!pw) throw new Error("此連結需要密碼，請輸入密碼後再試");
+      const formInfo = findForm(html, url);
+      if (formInfo) {
+        // 填入密碼
+        for (const key of Object.keys(formInfo.data)) {
+          if (["pass","pw","password","pwd","secret"].some(x=>key.toLowerCase().includes(x))) {
+            formInfo.data[key] = pw;
+          }
+        }
+        html = await postForm(formInfo.action, formInfo.data, url);
+        if (!html) throw new Error("密碼提交失敗，請稍後再試");
+      }
+    }
+
+    // 解析媒體
+    const media = extractMedia(html, url);
     fb.textContent="🔍 開始備份查詢";
     fb.disabled=false;
     resetTurnstile();
-    if(!res.ok||!d.success){
-      eb.textContent="⚠️ "+(d.detail||d.error||"查無內容，連結可能已過期或密碼錯誤");
+
+    if (!media) {
+      eb.textContent="⚠️ 查無媒體內容，連結可能已過期或密碼錯誤";
       eb.classList.remove("hidden");
       return;
     }
-    const proxy=`https://images.weserv.nl/?url=${encodeURIComponent(d.file_url)}`;
-    let media="";
-    if(d.type==="image") media=`<img class="pimg" src="${d.file_url}" onerror="this.src='${proxy}'" alt="預覽">`;
-    else if(d.type==="video") media=`<video class="pimg" src="${d.file_url}" controls></video>`;
-    else if(d.type==="audio") media=`<audio src="${d.file_url}" controls style="width:100%;margin-bottom:10px"></audio>`;
+
+    const filename = guessFilename(media.url, media.type);
+    const proxy = `https://images.weserv.nl/?url=${encodeURIComponent(media.url)}`;
+    let mediaHtml = "";
+    if(media.type==="image") mediaHtml=`<img class="pimg" src="${media.url}" onerror="this.src='${proxy}'" alt="預覽">`;
+    else if(media.type==="video") mediaHtml=`<video class="pimg" src="${media.url}" controls></video>`;
+    else if(media.type==="audio") mediaHtml=`<audio src="${media.url}" controls style="width:100%;margin-bottom:10px"></audio>`;
+
     rb.innerHTML=`<div class="scard">
       <div class="stitle">✅ 備份成功</div>
-      ${media}
-      <div class="rmeta"><span>📄 ${d.filename}</span><span>🏷 ${d.platform}</span></div>
+      ${mediaHtml}
+      <div class="rmeta"><span>📄 ${filename}</span></div>
       <div class="dlg">
-        <a href="${d.file_url}" download="${d.filename}" target="_blank"><button class="btn" style="background:linear-gradient(135deg,#059669,#047857)">⬇ 下載檔案</button></a>
-        <a href="${d.file_url}" target="_blank" style="flex:1;min-width:110px"><button class="bto" style="width:100%">🔗 開啟連結</button></a>
+        <a href="${media.url}" download="${filename}" target="_blank"><button class="btn" style="background:linear-gradient(135deg,#059669,#047857)">⬇ 下載檔案</button></a>
+        <a href="${media.url}" target="_blank" style="flex:1;min-width:110px"><button class="bto" style="width:100%">🔗 開啟連結</button></a>
       </div>
     </div>`;
-  }catch(e){
+
+  } catch(e) {
     fb.textContent="🔍 開始備份查詢";
     fb.disabled=false;
     resetTurnstile();
-    eb.textContent="⚠️ 連線失敗："+e.message;
+    eb.textContent="⚠️ " + e.message;
     eb.classList.remove("hidden");
   }
 }
